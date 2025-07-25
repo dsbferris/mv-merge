@@ -2,7 +2,15 @@
 
 set -e
 
-# Default options
+# ============
+# mv-merge.sh
+# ============
+# This script merges files or directories into a destination directory.
+# Supports copying, comparison, interactive mode, force overwrite, dry run, and summary.
+
+# ----------------------
+# Default Option Settings
+# ----------------------
 force=0
 compare=0
 rm_identical=0
@@ -12,7 +20,9 @@ interactive=0
 preserve_times=0
 show_summary=0
 
-# Stats
+# ----------------
+# Operation Counters
+# ----------------
 moved=0
 copied=0
 skipped=0
@@ -22,7 +32,9 @@ overwritten=0
 
 args=()
 
-# Parse flags
+# ---------------
+# Flag Processing
+# ---------------
 for arg in "$@"; do
     case "$arg" in
         -f|--force) force=1 ;;
@@ -33,25 +45,54 @@ for arg in "$@"; do
         -i|--interactive) interactive=1 ;;
         -t|--preserve-times) preserve_times=1 ;;
         --summary) show_summary=1 ;;
+        -h|--help)
+            echo "Usage: $0 [options] <source>... <destination>"
+            echo ""
+            echo "Options:"
+            echo "  -f, --force             Overwrite existing files without prompting"
+            echo "  -c, --compare-existing  Compare files before moving"
+            echo "  -r, --rm-identical      Remove source if identical to destination"
+            echo "  -n, --dry-run           Show what would be done, but do nothing"
+            echo "  -C, --copy              Copy instead of move"
+            echo "  -i, --interactive       Prompt before overwrite"
+            echo "  -t, --preserve-times    Preserve timestamps"
+            echo "  --summary               Show summary after completion"
+            echo "  -h, --help              Show this help message"
+            exit 0
+            ;;
         *) args+=("$arg") ;;
     esac
 done
 
+# -------------------------
+# Ensure minimum arguments
+# -------------------------
 if [[ "${#args[@]}" -lt 2 ]]; then
-    echo "Usage: $0 [-f|--force] [-c|--compare-existing] [-r|--rm-identical] [-n|--dry-run] [-C|--copy] [-i|--interactive] [-t|--preserve-times] [--summary] <source>... <destination>"
+    echo "Usage: $0 [options] <source>... <destination>"
+    echo "Try '$0 --help' for more information."
     exit 1
 fi
 
+# ---------------
+# Final Destination
+# ---------------
 dst="${args[-1]}"
 unset 'args[${#args[@]}-1]'
 
+# -------------------------
+# Utility: Get CRC32 Checksum
+# -------------------------
 get_crc32() {
     cksum "$1" | awk '{print $1}'
 }
 
+# --------------------------
+# Compare Two Files Verbosely
+# --------------------------
 compare_files() {
-    src_file="$1"
-    dst_file="$2"
+    local src_file="$1"
+    local dst_file="$2"
+
     echo "==> Comparing:"
     echo "SRC: $src_file"
     echo "DST: $dst_file"
@@ -63,6 +104,7 @@ compare_files() {
     fi
 
     ((compared++))
+    local src_size dst_size src_time dst_time
     src_size=$(stat -c %s "$src_file")
     dst_size=$(stat -c %s "$dst_file")
     src_time=$(stat -c %y "$src_file")
@@ -79,6 +121,7 @@ compare_files() {
         return
     fi
 
+    local src_crc dst_crc
     src_crc=$(get_crc32 "$src_file")
     dst_crc=$(get_crc32 "$dst_file")
 
@@ -93,6 +136,7 @@ compare_files() {
             else
                 rm -f "$src_file" && ((removed++))
                 echo "REMOVED: $src_file"
+                # Clean up empty parent dirs
                 dir="$(dirname "$src_file")"
                 while [[ "$dir" != "." && "$dir" != "/" ]]; do
                     rmdir "$dir" 2>/dev/null || break
@@ -106,6 +150,9 @@ compare_files() {
     echo
 }
 
+# -------------------------
+# Move or Copy a File
+# -------------------------
 move_or_copy() {
     local src="$1"
     local dst="$2"
@@ -126,6 +173,9 @@ move_or_copy() {
     fi
 }
 
+# --------------------------------
+# Central Logic: Handle File Move
+# --------------------------------
 handle_file_move() {
     local src_file="$1"
     local dst_file="$2"
@@ -153,31 +203,42 @@ handle_file_move() {
     fi
 }
 
+# ---------------------------
+# Main Loop Over Source Files
+# ---------------------------
 for src in "${args[@]}"; do
     if [[ -d "$src" && -d "$dst" ]]; then
+        # Directory → Directory merge
         find "$src" -type f | while read -r src_file; do
             rel_path="${src_file#$src/}"
             dst_file="$dst/$rel_path"
             handle_file_move "$src_file" "$dst_file"
         done
 
+        # Only delete if not in dry-run
         if [[ "$dry_run" -eq 0 ]]; then
             find "$src" -depth -type d -empty -delete
             rmdir "$src" 2>/dev/null || true
         fi
+
     elif [[ -f "$src" ]]; then
+        # File → File or File → Directory
         if [[ -d "$dst" ]]; then
             dst_file="$dst/$(basename "$src")"
         else
             dst_file="$dst"
         fi
         handle_file_move "$src" "$dst_file"
+
     else
         echo "SKIPPED (not file or dir): $src"
         ((skipped++))
     fi
 done
 
+# ------------
+# Show Summary
+# ------------
 if [[ "$show_summary" -eq 1 ]]; then
     echo "====== Summary ======"
     echo "Moved      : $moved"
