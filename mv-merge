@@ -5,34 +5,38 @@ force=0
 compare=0
 dry_run=0
 rm_identical=0
+copy_mode=0
+interactive=0
+preserve_times=0
+show_summary=0
+
+moved=0
+copied=0
+skipped=0
+removed=0
+compared=0
+overwritten=0
+
 args=()
 
 # Parse flags
 for arg in "$@"; do
     case "$arg" in
-        -m|--merge)
-            merge=1
-            ;;
-        -f|--force)
-            force=1
-            ;;
-        -c|--compare-existing)
-            compare=1
-            ;;
-        -n|--dry-run)
-            dry_run=1
-            ;;
-        -r|--rm-identical)
-            rm_identical=1
-            ;;
-        *)
-            args+=("$arg")
-            ;;
+        -m|--merge) merge=1 ;;
+        -f|--force) force=1 ;;
+        -c|--compare-existing) compare=1 ;;
+        -r|--rm-identical) rm_identical=1 ;;
+        -n|--dry-run) dry_run=1 ;;
+        -C|--copy) copy_mode=1 ;;
+        -i|--interactive) interactive=1 ;;
+        -t|--preserve-times) preserve_times=1 ;;
+        --summary) show_summary=1 ;;
+        *) args+=("$arg") ;;
     esac
 done
 
 if [[ "${#args[@]}" -lt 2 ]]; then
-    echo "Usage: $0 [-m|--merge] [-f|--force] [-c|--compare-existing] [-r|--rm-identical] [-n|--dry-run] <source>... <destination>"
+    echo "Usage: $0 [-m|--merge] [-f|--force] [-c|--compare-existing] [-r|--rm-identical] [-n|--dry-run] [-C|--copy] [-i|--interactive] [-t|--preserve-times] [--summary] <source>... <destination>"
     exit 1
 fi
 
@@ -56,6 +60,7 @@ compare_files() {
         return
     fi
 
+    ((compared++))
     src_size=$(stat -c %s "$src_file")
     dst_size=$(stat -c %s "$dst_file")
     src_time=$(stat -c %y "$src_file")
@@ -81,10 +86,15 @@ compare_files() {
     if [[ "$src_crc" == "$dst_crc" ]]; then
         echo "Files are IDENTICAL"
         if [[ "$rm_identical" -eq 1 ]]; then
+            if [[ "$interactive" -eq 1 ]]; then
+                read -p "Remove identical file $src_file? [y/N] " reply
+                [[ "$reply" =~ ^[Yy]$ ]] || { echo "SKIPPED (user): $src_file"; ((skipped++)); return; }
+            fi
+
             if [[ "$dry_run" -eq 1 ]]; then
                 echo "WOULD REMOVE: $src_file"
             else
-                rm -f "$src_file"
+                rm -f "$src_file" && ((removed++))
                 echo "REMOVED: $src_file"
                 dir="$(dirname "$src_file")"
                 while [[ "$dir" != "." && "$dir" != "/" ]]; do
@@ -99,6 +109,35 @@ compare_files() {
     echo
 }
 
+move_or_copy() {
+    src="$1"
+    dst="$2"
+
+    if [[ "$interactive" -eq 1 && -e "$dst" && "$force" -eq 0 ]]; then
+        read -p "Overwrite $dst? [y/N] " reply
+        [[ "$reply" =~ ^[Yy]$ ]] || { echo "SKIPPED (user): $dst"; ((skipped++)); return; }
+    fi
+
+    if [[ "$dry_run" -eq 1 ]]; then
+        echo "WOULD ${copy_mode:+COPY}${copy_mode:+"MOVE"}: $src -> $dst"
+        return
+    fi
+
+    if [[ "$copy_mode" -eq 1 ]]; then
+        cp -f "$src" "$dst" && ((copied++))
+    else
+        mv -f "$src" "$dst" && ((moved++))
+    fi
+
+    if [[ "$preserve_times" -eq 1 ]]; then
+        touch -r "$src" "$dst"
+    fi
+
+    ((overwritten++))
+    echo "MOVED: $src -> $dst"
+}
+
+# Default (non-merge)
 if [[ "$merge" -eq 0 ]]; then
     for src in "${args[@]}"; do
         dst_file="$dst/$(basename "$src")"
@@ -110,15 +149,24 @@ if [[ "$merge" -eq 0 ]]; then
 
         if [[ -e "$dst_file" && "$force" -eq 0 ]]; then
             echo "SKIPPED (exists): $dst_file"
+            ((skipped++))
             continue
         fi
 
-        if [[ "$dry_run" -eq 1 ]]; then
-            echo "WOULD MOVE: $src -> $dst"
-        else
-            mv ${force:+-f} "$src" "$dst"
-        fi
+        move_or_copy "$src" "$dst"
     done
+
+    [[ "$show_summary" -eq 1 ]] && {
+        echo "====== Summary ======"
+        echo "Moved     : $moved"
+        echo "Copied    : $copied"
+        echo "Skipped   : $skipped"
+        echo "Compared  : $compared"
+        echo "Removed   : $removed"
+        echo "Overwritten: $overwritten"
+        echo "====================="
+    }
+
     exit 0
 fi
 
@@ -141,22 +189,17 @@ for src in "${args[@]}"; do
                     continue
                 fi
 
-                if [[ "$force" -eq 1 ]]; then
-                    if [[ "$dry_run" -eq 1 ]]; then
-                        echo "WOULD OVERWRITE: $src_file -> $dst_file"
-                    else
-                        mv -f "$src_file" "$dst_file"
-                        echo "OVERWRITTEN: $dst_file"
-                    fi
+                if [[ "$force" -eq 1 || "$interactive" -eq 0 ]]; then
+                    move_or_copy "$src_file" "$dst_file"
                 else
-                    echo "SKIPPED (exists): $dst_file"
+                    read -p "Overwrite $dst_file? [y/N] " reply
+                    [[ "$reply" =~ ^[Yy]$ ]] && move_or_copy "$src_file" "$dst_file" || {
+                        echo "SKIPPED (user): $dst_file"
+                        ((skipped++))
+                    }
                 fi
             else
-                if [[ "$dry_run" -eq 1 ]]; then
-                    echo "WOULD MOVE: $src_file -> $dst_file"
-                else
-                    mv "$src_file" "$dst_file"
-                fi
+                move_or_copy "$src_file" "$dst_file"
             fi
         done
 
@@ -175,21 +218,22 @@ for src in "${args[@]}"; do
 
             if [[ "$force" -eq 0 ]]; then
                 echo "SKIPPED (exists): $dst_file"
+                ((skipped++))
                 continue
             fi
-
-            if [[ "$dry_run" -eq 1 ]]; then
-                echo "WOULD OVERWRITE: $src -> $dst_file"
-            else
-                mv -f "$src" "$dst"
-                echo "OVERWRITTEN: $dst_file"
-            fi
-        else
-            if [[ "$dry_run" -eq 1 ]]; then
-                echo "WOULD MOVE: $src -> $dst"
-            else
-                mv "$src" "$dst"
-            fi
         fi
+
+        move_or_copy "$src" "$dst"
     fi
 done
+
+[[ "$show_summary" -eq 1 ]] && {
+    echo "====== Summary ======"
+    echo "Moved     : $moved"
+    echo "Copied    : $copied"
+    echo "Skipped   : $skipped"
+    echo "Compared  : $compared"
+    echo "Removed   : $removed"
+    echo "Overwritten: $overwritten"
+    echo "====================="
+}
