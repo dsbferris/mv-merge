@@ -2,6 +2,8 @@
 
 merge=0
 force=0
+compare=0
+dry_run=0
 args=()
 
 # Parse flags
@@ -13,6 +15,12 @@ for arg in "$@"; do
         -f|--force)
             force=1
             ;;
+        -c|--compare-existing)
+            compare=1
+            ;;
+        -n|--dry-run)
+            dry_run=1
+            ;;
         *)
             args+=("$arg")
             ;;
@@ -20,59 +28,140 @@ for arg in "$@"; do
 done
 
 if [[ "${#args[@]}" -lt 2 ]]; then
-    echo "Usage: $0 [-m|--merge] [-f|--force] <source>... <destination>"
+    echo "Usage: $0 [-m|--merge] [-f|--force] [-c|--compare-existing] [-n|--dry-run] <source>... <destination>"
     exit 1
 fi
 
-# Destination is last arg
 dst="${args[-1]}"
 unset 'args[${#args[@]}-1]'
 
-# Default to plain mv
-if [[ "$merge" -eq 0 ]]; then
-    if [[ "$force" -eq 1 ]]; then
-        mv -f "${args[@]}" "$dst"
-    else
-        mv "${args[@]}" "$dst"
+compare_files() {
+    src_file="$1"
+    dst_file="$2"
+    echo "==> Comparing:"
+    echo "SRC: $src_file"
+    echo "DST: $dst_file"
+    echo "---"
+
+    if [[ ! -e "$dst_file" ]]; then
+        echo "Destination does not exist."
+        return
     fi
-    exit $?
+
+    src_size=$(stat -c %s "$src_file")
+    dst_size=$(stat -c %s "$dst_file")
+    src_time=$(stat -c %y "$src_file")
+    dst_time=$(stat -c %y "$dst_file")
+    src_hash=$(md5sum "$src_file" | awk '{print $1}')
+    dst_hash=$(md5sum "$dst_file" | awk '{print $1}')
+
+    echo "SRC Size: $src_size bytes"
+    echo "DST Size: $dst_size bytes"
+    echo "SRC Time: $src_time"
+    echo "DST Time: $dst_time"
+    echo "SRC MD5 : $src_hash"
+    echo "DST MD5 : $dst_hash"
+
+    if [[ "$src_hash" == "$dst_hash" ]]; then
+        echo "Files are IDENTICAL"
+    else
+        echo "Files DIFFER"
+    fi
+    echo
+}
+
+if [[ "$merge" -eq 0 ]]; then
+    for src in "${args[@]}"; do
+        dst_file="$dst/$(basename "$src")"
+
+        if [[ "$compare" -eq 1 ]]; then
+            compare_files "$src" "$dst_file"
+            continue
+        fi
+
+        if [[ -e "$dst_file" && "$force" -eq 0 ]]; then
+            echo "SKIPPED (exists): $dst_file"
+            continue
+        fi
+
+        if [[ "$dry_run" -eq 1 ]]; then
+            echo "WOULD MOVE: $src -> $dst"
+        else
+            if [[ "$force" -eq 1 ]]; then
+                mv -f "$src" "$dst"
+            else
+                mv "$src" "$dst"
+            fi
+        fi
+    done
+    exit 0
 fi
 
 # Merge mode
 for src in "${args[@]}"; do
-    if [[ -d "$src" && -d "$dst" ]]; then
-        # Merge directory contents
+    if [[ -d "$src" ]]; then
+        base_name="$(basename "$src")"
+        target_dir="$dst/$base_name"
+        mkdir -p "$target_dir"
+
         find "$src" -type f | while read -r src_file; do
             rel_path="${src_file#$src/}"
-            dst_file="$dst/$rel_path"
+            dst_file="$target_dir/$rel_path"
             dst_dir="$(dirname "$dst_file")"
-
             mkdir -p "$dst_dir"
 
             if [[ -e "$dst_file" ]]; then
+                if [[ "$compare" -eq 1 ]]; then
+                    compare_files "$src_file" "$dst_file"
+                    continue
+                fi
+
                 if [[ "$force" -eq 1 ]]; then
-                    mv -f "$src_file" "$dst_file"
-                    echo "OVERWRITTEN: $dst_file"
+                    if [[ "$dry_run" -eq 1 ]]; then
+                        echo "WOULD OVERWRITE: $src_file -> $dst_file"
+                    else
+                        mv -f "$src_file" "$dst_file"
+                        echo "OVERWRITTEN: $dst_file"
+                    fi
                 else
                     echo "SKIPPED (exists): $dst_file"
                 fi
             else
-                mv "$src_file" "$dst_file"
+                if [[ "$dry_run" -eq 1 ]]; then
+                    echo "WOULD MOVE: $src_file -> $dst_file"
+                else
+                    mv "$src_file" "$dst_file"
+                fi
             fi
         done
 
-        # Clean up source directory
-        find "$src" -depth -type d -empty -delete
-        rmdir "$src" 2>/dev/null
+        if [[ "$dry_run" -eq 0 ]]; then
+            find "$src" -depth -type d -empty -delete
+            rmdir "$src" 2>/dev/null
+        fi
     else
-        # Non-directory
         dst_file="$dst/$(basename "$src")"
-        if [[ -e "$dst_file" && "$force" -eq 0 ]]; then
-            echo "SKIPPED (exists): $dst_file"
-        else
-            if [[ "$force" -eq 1 ]]; then
+
+        if [[ -e "$dst_file" ]]; then
+            if [[ "$compare" -eq 1 ]]; then
+                compare_files "$src" "$dst_file"
+                continue
+            fi
+
+            if [[ "$force" -eq 0 ]]; then
+                echo "SKIPPED (exists): $dst_file"
+                continue
+            fi
+
+            if [[ "$dry_run" -eq 1 ]]; then
+                echo "WOULD OVERWRITE: $src -> $dst_file"
+            else
                 mv -f "$src" "$dst"
                 echo "OVERWRITTEN: $dst_file"
+            fi
+        else
+            if [[ "$dry_run" -eq 1 ]]; then
+                echo "WOULD MOVE: $src -> $dst"
             else
                 mv "$src" "$dst"
             fi
