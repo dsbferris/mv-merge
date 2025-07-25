@@ -4,6 +4,7 @@ merge=0
 force=0
 compare=0
 dry_run=0
+rm_identical=0
 args=()
 
 # Parse flags
@@ -21,6 +22,9 @@ for arg in "$@"; do
         -n|--dry-run)
             dry_run=1
             ;;
+        -r|--rm-identical)
+            rm_identical=1
+            ;;
         *)
             args+=("$arg")
             ;;
@@ -28,12 +32,16 @@ for arg in "$@"; do
 done
 
 if [[ "${#args[@]}" -lt 2 ]]; then
-    echo "Usage: $0 [-m|--merge] [-f|--force] [-c|--compare-existing] [-n|--dry-run] <source>... <destination>"
+    echo "Usage: $0 [-m|--merge] [-f|--force] [-c|--compare-existing] [-r|--rm-identical] [-n|--dry-run] <source>... <destination>"
     exit 1
 fi
 
 dst="${args[-1]}"
 unset 'args[${#args[@]}-1]'
+
+get_crc32() {
+    cksum "$1" | awk '{print $1}'
+}
 
 compare_files() {
     src_file="$1"
@@ -52,18 +60,32 @@ compare_files() {
     dst_size=$(stat -c %s "$dst_file")
     src_time=$(stat -c %y "$src_file")
     dst_time=$(stat -c %y "$dst_file")
-    src_hash=$(md5sum "$src_file" | awk '{print $1}')
-    dst_hash=$(md5sum "$dst_file" | awk '{print $1}')
+    src_crc=$(get_crc32 "$src_file")
+    dst_crc=$(get_crc32 "$dst_file")
 
     echo "SRC Size: $src_size bytes"
     echo "DST Size: $dst_size bytes"
     echo "SRC Time: $src_time"
     echo "DST Time: $dst_time"
-    echo "SRC MD5 : $src_hash"
-    echo "DST MD5 : $dst_hash"
+    echo "SRC CRC32: $src_crc"
+    echo "DST CRC32: $dst_crc"
 
-    if [[ "$src_hash" == "$dst_hash" ]]; then
+    if [[ "$src_crc" == "$dst_crc" ]]; then
         echo "Files are IDENTICAL"
+        if [[ "$rm_identical" -eq 1 ]]; then
+            if [[ "$dry_run" -eq 1 ]]; then
+                echo "WOULD REMOVE: $src_file"
+            else
+                rm -f "$src_file"
+                echo "REMOVED: $src_file"
+                # Clean up empty parent dirs
+                dir="$(dirname "$src_file")"
+                while [[ "$dir" != "." && "$dir" != "/" ]]; do
+                    rmdir "$dir" 2>/dev/null || break
+                    dir="$(dirname "$dir")"
+                done
+            fi
+        fi
     else
         echo "Files DIFFER"
     fi
@@ -87,11 +109,7 @@ if [[ "$merge" -eq 0 ]]; then
         if [[ "$dry_run" -eq 1 ]]; then
             echo "WOULD MOVE: $src -> $dst"
         else
-            if [[ "$force" -eq 1 ]]; then
-                mv -f "$src" "$dst"
-            else
-                mv "$src" "$dst"
-            fi
+            mv ${force:+-f} "$src" "$dst"
         fi
     done
     exit 0
