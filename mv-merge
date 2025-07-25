@@ -1,5 +1,6 @@
 #!/bin/bash
-set -euo pipefail
+set +e -uo pipefail
+# set +e -uo pipefail
 
 # ============
 # mv-merge.sh
@@ -18,6 +19,7 @@ copy_mode=0
 interactive=0
 preserve_times=0
 show_summary=0
+verbose=0
 
 # ----------------
 # Operation Counters
@@ -42,7 +44,7 @@ for arg in "$@"; do
         -C|--copy) copy_mode=1 ;;
         -i|--interactive) interactive=1 ;;
         -t|--preserve-times) preserve_times=1 ;;
-        --summary) show_summary=1 ;;
+        -s|--summary) show_summary=1 ;;
         -v|--verbose) verbose=1 ;;
         *) args+=("$arg") ;;
     esac
@@ -58,7 +60,7 @@ if [[ "${#args[@]}" -lt 2 ]]; then
     echo "  -C, --copy              Copy instead of move"
     echo "  -i, --interactive       Prompt on existing destination file"
     echo "  -t, --preserve-times    Preserve modification times"
-    echo "  --summary               Show summary after execution"
+    echo "  -s, --summary           Show summary after execution"
     echo "  -v, --verbose           Print detailed operations"
     exit 1
 fi
@@ -81,12 +83,6 @@ compare_files() {
         echo "==> Comparing:"
         echo "SRC: $src_file"
         echo "DST: $dst_file"
-        echo "---"
-    fi
-
-    if [[ ! -e "$dst_file" ]]; then
-        [[ "$verbose" -eq 1 ]] && echo "Destination does not exist."
-        return
     fi
 
     ((compared++))
@@ -105,7 +101,7 @@ compare_files() {
 
     if [[ "$src_size" -ne "$dst_size" ]]; then
         [[ "$verbose" -eq 1 ]] && echo "Files DIFFER (size mismatch)"
-        return
+        return 1
     fi
 
     local src_crc dst_crc
@@ -117,31 +113,34 @@ compare_files() {
         echo "DST CRC32: $dst_crc"
     fi
 
-    if [[ "$src_crc" == "$dst_crc" ]]; then
-        [[ "$verbose" -eq 1 ]] && echo "Files are IDENTICAL"
-        if [[ "$rm_identical" -eq 1 ]]; then
-            if [[ "$dry_run" -eq 1 ]]; then
-                echo "WOULD REMOVE: $src_file"
+
+    if [[ "$src_crc" != "$dst_crc" ]]; then
+        [[ "$verbose" -eq 1 ]] && echo "Files DIFFER (CRC mismatch)"
+        return 1  # Files different
+    fi
+
+    [[ "$verbose" -eq 1 ]] && echo "Files IDENTICAL"
+    if [[ "$rm_identical" -eq 1 ]]; then
+        if [[ "$dry_run" -eq 1 ]]; then
+            echo "WOULD REMOVE: $src_file"
+        else
+            if rm -f "$src_file"; then
+                ((removed++))
+                [[ "$verbose" -eq 1 ]] && echo "REMOVED: $src_file"
+                # Remove empty parent directories
+                local dir
+                dir="$(dirname "$src_file")"
+                while [[ "$dir" != "." && "$dir" != "/" ]]; do
+                    rmdir "$dir" 2>/dev/null || break
+                    dir="$(dirname "$dir")"
+                done
             else
-                if rm -f "$src_file"; then
-                    ((removed++))
-                    echo "REMOVED: $src_file"
-                    # Remove empty parent directories
-                    local dir
-                    dir="$(dirname "$src_file")"
-                    while [[ "$dir" != "." && "$dir" != "/" ]]; do
-                        rmdir "$dir" 2>/dev/null || break
-                        dir="$(dirname "$dir")"
-                    done
-                else
-                    echo "ERROR: Failed to remove $src_file" >&2
-                    ((had_error++))
-                fi
+                echo "ERROR: Failed to remove $src_file" >&2
+                ((had_error++))
             fi
         fi
-    else
-        [[ "$verbose" -eq 1 ]] && echo "Files DIFFER (CRC mismatch)"
     fi
+    return 0
 }
 
 # === File move/copy handler ===
@@ -150,7 +149,11 @@ move_or_copy() {
     local dst="$2"
 
     if [[ "$dry_run" -eq 1 ]]; then
-        echo "WOULD ${copy_mode:+COPY}${copy_mode:+'MOVE'}: $src -> $dst"
+        if [[ "$copy_mode" -eq 1 ]]; then
+            echo "WOULD COPY: $src -> $dst"
+        else
+            echo "WOULD MOVE: $src -> $dst"
+        fi
         return 0
     fi
 
@@ -186,13 +189,22 @@ handle_file_move() {
     mkdir -p "$(dirname "$dst_file")"
 
     if [[ -e "$dst_file" ]]; then
-        [[ "$compare" -eq 1 ]] && compare_files "$src_file" "$dst_file"
+
+        if [[ "$compare" -eq 1 ]]; then
+            if compare_files "$src_file" "$dst_file"; then
+                # Files are identical and (optionally) removed — no need to overwrite
+                return
+            fi
+        fi
 
         if [[ "$interactive" -eq 1 && "$force" -eq 0 ]]; then
             read -p "Overwrite $dst_file? [y/N] " reply
-            [[ "$reply" =~ ^[Yy]$ ]] || { ((skipped++)); return; }
+            [[ "$reply" =~ ^[Yy]$ ]] || { 
+                ((skipped++)); 
+                [[ "$verbose" -eq 1 || "$dry_run" -eq 1 ]] && echo "SKIPPED (user choice): $dst_file"
+                return; }
         elif [[ "$force" -eq 0 && "$interactive" -eq 0 ]]; then
-            [[ "$verbose" -eq 1 ]] && echo "SKIPPED (no action): $dst_file"
+            [[ "$verbose" -eq 1 || "$dry_run" -eq 1 ]] && echo "SKIPPED (no force): $dst_file"
             ((skipped++))
             return
         fi
@@ -202,17 +214,21 @@ handle_file_move() {
     else
         move_or_copy "$src_file" "$dst_file"
     fi
+
 }
 
 # === Main loop ===
 for src in "${args[@]}"; do
     if [[ -d "$src" && -d "$dst" ]]; then
         # Directory → Directory merge
-        find "$src" -type f | while read -r src_file; do
+        while read -r src_file; do
+        # find "$src" -type f | while read -r src_file; do
             rel_path="${src_file#$src/}"
             dst_file="$dst/$rel_path"
             handle_file_move "$src_file" "$dst_file"
-        done
+            [[ "$verbose" -eq 1 ]] && echo ""
+        # done
+        done < <(find "$src" -type f)
 
         # Only delete if not in dry-run
         if [[ "$dry_run" -eq 0 ]]; then
@@ -227,6 +243,7 @@ for src in "${args[@]}"; do
             dst_file="$dst"
         fi
         handle_file_move "$src" "$dst_file"
+        [[ "$verbose" -eq 1 ]] && echo ""
     else
         echo "SKIPPED (not file or dir): $src"
         ((skipped++))
