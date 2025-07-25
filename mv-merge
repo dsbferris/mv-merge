@@ -1,15 +1,18 @@
 #!/bin/bash
 
-merge=0
+set -e
+
+# Default options
 force=0
 compare=0
-dry_run=0
 rm_identical=0
+dry_run=0
 copy_mode=0
 interactive=0
 preserve_times=0
 show_summary=0
 
+# Stats
 moved=0
 copied=0
 skipped=0
@@ -22,7 +25,6 @@ args=()
 # Parse flags
 for arg in "$@"; do
     case "$arg" in
-        -m|--merge) merge=1 ;;
         -f|--force) force=1 ;;
         -c|--compare-existing) compare=1 ;;
         -r|--rm-identical) rm_identical=1 ;;
@@ -36,7 +38,7 @@ for arg in "$@"; do
 done
 
 if [[ "${#args[@]}" -lt 2 ]]; then
-    echo "Usage: $0 [-m|--merge] [-f|--force] [-c|--compare-existing] [-r|--rm-identical] [-n|--dry-run] [-C|--copy] [-i|--interactive] [-t|--preserve-times] [--summary] <source>... <destination>"
+    echo "Usage: $0 [-f|--force] [-c|--compare-existing] [-r|--rm-identical] [-n|--dry-run] [-C|--copy] [-i|--interactive] [-t|--preserve-times] [--summary] <source>... <destination>"
     exit 1
 fi
 
@@ -86,11 +88,6 @@ compare_files() {
     if [[ "$src_crc" == "$dst_crc" ]]; then
         echo "Files are IDENTICAL"
         if [[ "$rm_identical" -eq 1 ]]; then
-            if [[ "$interactive" -eq 1 ]]; then
-                read -p "Remove identical file $src_file? [y/N] " reply
-                [[ "$reply" =~ ^[Yy]$ ]] || { echo "SKIPPED (user): $src_file"; ((skipped++)); return; }
-            fi
-
             if [[ "$dry_run" -eq 1 ]]; then
                 echo "WOULD REMOVE: $src_file"
             else
@@ -110,94 +107,49 @@ compare_files() {
 }
 
 move_or_copy() {
-    src="$1"
-    dst="$2"
-
-    if [[ "$interactive" -eq 1 && -e "$dst" && "$force" -eq 0 ]]; then
-        read -p "Overwrite $dst? [y/N] " reply
-        [[ "$reply" =~ ^[Yy]$ ]] || { echo "SKIPPED (user): $dst"; ((skipped++)); return; }
-    fi
+    local src_file="$1"
+    local dst_file="$2"
 
     if [[ "$dry_run" -eq 1 ]]; then
-        echo "WOULD ${copy_mode:+COPY}${copy_mode:+"MOVE"}: $src -> $dst"
+        echo "WOULD ${copy_mode:+COPY}${copy_mode:+'MOVE'}: $src_file -> $dst_file"
         return
     fi
 
     if [[ "$copy_mode" -eq 1 ]]; then
-        cp -f "$src" "$dst" && ((copied++))
+        cp -f "$src_file" "$dst_file" && ((copied++))
     else
-        mv -f "$src" "$dst" && ((moved++))
+        mv -f "$src_file" "$dst_file" && ((moved++))
     fi
 
     if [[ "$preserve_times" -eq 1 ]]; then
-        touch -r "$src" "$dst"
+        touch -r "$src_file" "$dst_file"
     fi
-
-    ((overwritten++))
-    echo "MOVED: $src -> $dst"
 }
 
-# Default (non-merge)
-if [[ "$merge" -eq 0 ]]; then
-    for src in "${args[@]}"; do
-        dst_file="$dst/$(basename "$src")"
-
-        if [[ "$compare" -eq 1 ]]; then
-            compare_files "$src" "$dst_file"
-            continue
-        fi
-
-        if [[ -e "$dst_file" && "$force" -eq 0 ]]; then
-            echo "SKIPPED (exists): $dst_file"
-            ((skipped++))
-            continue
-        fi
-
-        move_or_copy "$src" "$dst"
-    done
-
-    [[ "$show_summary" -eq 1 ]] && {
-        echo "====== Summary ======"
-        echo "Moved     : $moved"
-        echo "Copied    : $copied"
-        echo "Skipped   : $skipped"
-        echo "Compared  : $compared"
-        echo "Removed   : $removed"
-        echo "Overwritten: $overwritten"
-        echo "====================="
-    }
-
-    exit 0
-fi
-
-# Merge mode
 for src in "${args[@]}"; do
-    if [[ -d "$src" ]]; then
-        base_name="$(basename "$src")"
-        target_dir="$dst/$base_name"
-        mkdir -p "$target_dir"
-
+    if [[ -d "$src" && -d "$dst" ]]; then
         find "$src" -type f | while read -r src_file; do
             rel_path="${src_file#$src/}"
-            dst_file="$target_dir/$rel_path"
+            dst_file="$dst/$rel_path"
             dst_dir="$(dirname "$dst_file")"
             mkdir -p "$dst_dir"
 
             if [[ -e "$dst_file" ]]; then
                 if [[ "$compare" -eq 1 ]]; then
                     compare_files "$src_file" "$dst_file"
+                fi
+
+                if [[ "$interactive" -eq 1 && "$force" -eq 0 ]]; then
+                    read -p "Overwrite $dst_file? [y/N] " reply
+                    [[ "$reply" =~ ^[Yy]$ ]] || { ((skipped++)); continue; }
+                elif [[ "$force" -eq 0 && "$interactive" -eq 0 ]]; then
+                    echo "SKIPPED (no action): $dst_file"
+                    ((skipped++))
                     continue
                 fi
 
-                if [[ "$force" -eq 1 || "$interactive" -eq 0 ]]; then
-                    move_or_copy "$src_file" "$dst_file"
-                else
-                    read -p "Overwrite $dst_file? [y/N] " reply
-                    [[ "$reply" =~ ^[Yy]$ ]] && move_or_copy "$src_file" "$dst_file" || {
-                        echo "SKIPPED (user): $dst_file"
-                        ((skipped++))
-                    }
-                fi
+                move_or_copy "$src_file" "$dst_file"
+                ((overwritten++))
             else
                 move_or_copy "$src_file" "$dst_file"
             fi
@@ -205,7 +157,7 @@ for src in "${args[@]}"; do
 
         if [[ "$dry_run" -eq 0 ]]; then
             find "$src" -depth -type d -empty -delete
-            rmdir "$src" 2>/dev/null
+            rmdir "$src" 2>/dev/null || true
         fi
     else
         dst_file="$dst/$(basename "$src")"
@@ -213,27 +165,32 @@ for src in "${args[@]}"; do
         if [[ -e "$dst_file" ]]; then
             if [[ "$compare" -eq 1 ]]; then
                 compare_files "$src" "$dst_file"
-                continue
             fi
 
-            if [[ "$force" -eq 0 ]]; then
-                echo "SKIPPED (exists): $dst_file"
+            if [[ "$interactive" -eq 1 && "$force" -eq 0 ]]; then
+                read -p "Overwrite $dst_file? [y/N] " reply
+                [[ "$reply" =~ ^[Yy]$ ]] || { ((skipped++)); continue; }
+            elif [[ "$force" -eq 0 && "$interactive" -eq 0 ]]; then
+                echo "SKIPPED (no action): $dst_file"
                 ((skipped++))
                 continue
             fi
-        fi
 
-        move_or_copy "$src" "$dst"
+            move_or_copy "$src" "$dst_file"
+            ((overwritten++))
+        else
+            move_or_copy "$src" "$dst_file"
+        fi
     fi
 done
 
-[[ "$show_summary" -eq 1 ]] && {
+if [[ "$show_summary" -eq 1 ]]; then
     echo "====== Summary ======"
-    echo "Moved     : $moved"
-    echo "Copied    : $copied"
-    echo "Skipped   : $skipped"
-    echo "Compared  : $compared"
-    echo "Removed   : $removed"
+    echo "Moved      : $moved"
+    echo "Copied     : $copied"
     echo "Overwritten: $overwritten"
+    echo "Removed    : $removed"
+    echo "Skipped    : $skipped"
+    echo "Compared   : $compared"
     echo "====================="
-}
+fi
