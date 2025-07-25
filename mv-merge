@@ -1,0 +1,81 @@
+#!/bin/bash
+
+merge=0
+force=0
+args=()
+
+# Parse flags
+for arg in "$@"; do
+    case "$arg" in
+        -m|--merge)
+            merge=1
+            ;;
+        -f|--force)
+            force=1
+            ;;
+        *)
+            args+=("$arg")
+            ;;
+    esac
+done
+
+if [[ "${#args[@]}" -lt 2 ]]; then
+    echo "Usage: $0 [-m|--merge] [-f|--force] <source>... <destination>"
+    exit 1
+fi
+
+# Destination is last arg
+dst="${args[-1]}"
+unset 'args[${#args[@]}-1]'
+
+# Default to plain mv
+if [[ "$merge" -eq 0 ]]; then
+    if [[ "$force" -eq 1 ]]; then
+        mv -f "${args[@]}" "$dst"
+    else
+        mv "${args[@]}" "$dst"
+    fi
+    exit $?
+fi
+
+# Merge mode
+for src in "${args[@]}"; do
+    if [[ -d "$src" && -d "$dst" ]]; then
+        # Merge directory contents
+        find "$src" -type f | while read -r src_file; do
+            rel_path="${src_file#$src/}"
+            dst_file="$dst/$rel_path"
+            dst_dir="$(dirname "$dst_file")"
+
+            mkdir -p "$dst_dir"
+
+            if [[ -e "$dst_file" ]]; then
+                if [[ "$force" -eq 1 ]]; then
+                    mv -f "$src_file" "$dst_file"
+                    echo "OVERWRITTEN: $dst_file"
+                else
+                    echo "SKIPPED (exists): $dst_file"
+                fi
+            else
+                mv "$src_file" "$dst_file"
+            fi
+        done
+
+        # Clean up source directory
+        find "$src" -depth -type d -empty -delete
+        rmdir "$src" 2>/dev/null
+    else
+        # Non-directory
+        dst_file="$dst/$(basename "$src")"
+        if [[ -e "$dst_file" && "$force" -eq 0 ]]; then
+            echo "SKIPPED (exists): $dst_file"
+        else
+            if [[ "$force" -eq 1 ]]; then
+                mv -f "$src" "$dst"
+                echo "OVERWRITTEN: $dst_file"
+            else
+                mv "$src" "$dst"
+            fi
+        fi
+    fi
+done
