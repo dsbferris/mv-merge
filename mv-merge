@@ -1,6 +1,5 @@
 #!/bin/bash
-
-set -e
+set -euo pipefail
 
 # ============
 # mv-merge.sh
@@ -29,12 +28,11 @@ skipped=0
 removed=0
 compared=0
 overwritten=0
+had_error=0
 
 args=()
 
-# ---------------
-# Flag Processing
-# ---------------
+# === Parse arguments ===
 for arg in "$@"; do
     case "$arg" in
         -f|--force) force=1 ;;
@@ -45,61 +43,49 @@ for arg in "$@"; do
         -i|--interactive) interactive=1 ;;
         -t|--preserve-times) preserve_times=1 ;;
         --summary) show_summary=1 ;;
-        -h|--help)
-            echo "Usage: $0 [options] <source>... <destination>"
-            echo ""
-            echo "Options:"
-            echo "  -f, --force             Overwrite existing files without prompting"
-            echo "  -c, --compare-existing  Compare files before moving"
-            echo "  -r, --rm-identical      Remove source if identical to destination"
-            echo "  -n, --dry-run           Show what would be done, but do nothing"
-            echo "  -C, --copy              Copy instead of move"
-            echo "  -i, --interactive       Prompt before overwrite"
-            echo "  -t, --preserve-times    Preserve timestamps"
-            echo "  --summary               Show summary after completion"
-            echo "  -h, --help              Show this help message"
-            exit 0
-            ;;
+        -v|--verbose) verbose=1 ;;
         *) args+=("$arg") ;;
     esac
 done
 
-# -------------------------
-# Ensure minimum arguments
-# -------------------------
 if [[ "${#args[@]}" -lt 2 ]]; then
     echo "Usage: $0 [options] <source>... <destination>"
-    echo "Try '$0 --help' for more information."
+    echo "Options:"
+    echo "  -f, --force             Overwrite existing files without prompt"
+    echo "  -c, --compare-existing  Compare files before action (by size + CRC32)"
+    echo "  -r, --rm-identical      Remove source if files are identical"
+    echo "  -n, --dry-run           Don't perform any changes"
+    echo "  -C, --copy              Copy instead of move"
+    echo "  -i, --interactive       Prompt on existing destination file"
+    echo "  -t, --preserve-times    Preserve modification times"
+    echo "  --summary               Show summary after execution"
+    echo "  -v, --verbose           Print detailed operations"
     exit 1
 fi
 
-# ---------------
-# Final Destination
-# ---------------
+# === Final Destination ===
 dst="${args[-1]}"
 unset 'args[${#args[@]}-1]'
 
-# -------------------------
-# Utility: Get CRC32 Checksum
-# -------------------------
+# === Utility: CRC32 checksum ===
 get_crc32() {
     cksum "$1" | awk '{print $1}'
 }
 
-# --------------------------
-# Compare Two Files Verbosely
-# --------------------------
+# === File comparison ===
 compare_files() {
     local src_file="$1"
     local dst_file="$2"
 
-    echo "==> Comparing:"
-    echo "SRC: $src_file"
-    echo "DST: $dst_file"
-    echo "---"
+    if [[ "$verbose" -eq 1 ]]; then
+        echo "==> Comparing:"
+        echo "SRC: $src_file"
+        echo "DST: $dst_file"
+        echo "---"
+    fi
 
     if [[ ! -e "$dst_file" ]]; then
-        echo "Destination does not exist."
+        [[ "$verbose" -eq 1 ]] && echo "Destination does not exist."
         return
     fi
 
@@ -110,14 +96,15 @@ compare_files() {
     src_time=$(stat -c %y "$src_file")
     dst_time=$(stat -c %y "$dst_file")
 
-    echo "SRC Size: $src_size bytes"
-    echo "DST Size: $dst_size bytes"
-    echo "SRC Time: $src_time"
-    echo "DST Time: $dst_time"
+    if [[ "$verbose" -eq 1 ]]; then
+        echo "SRC Size: $src_size bytes"
+        echo "DST Size: $dst_size bytes"
+        echo "SRC Time: $src_time"
+        echo "DST Time: $dst_time"
+    fi
 
     if [[ "$src_size" -ne "$dst_size" ]]; then
-        echo "Files DIFFER (size mismatch)"
-        echo
+        [[ "$verbose" -eq 1 ]] && echo "Files DIFFER (size mismatch)"
         return
     fi
 
@@ -125,57 +112,73 @@ compare_files() {
     src_crc=$(get_crc32 "$src_file")
     dst_crc=$(get_crc32 "$dst_file")
 
-    echo "SRC CRC32: $src_crc"
-    echo "DST CRC32: $dst_crc"
+    if [[ "$verbose" -eq 1 ]]; then
+        echo "SRC CRC32: $src_crc"
+        echo "DST CRC32: $dst_crc"
+    fi
 
     if [[ "$src_crc" == "$dst_crc" ]]; then
-        echo "Files are IDENTICAL"
+        [[ "$verbose" -eq 1 ]] && echo "Files are IDENTICAL"
         if [[ "$rm_identical" -eq 1 ]]; then
             if [[ "$dry_run" -eq 1 ]]; then
                 echo "WOULD REMOVE: $src_file"
             else
-                rm -f "$src_file" && ((removed++))
-                echo "REMOVED: $src_file"
-                # Clean up empty parent dirs
-                dir="$(dirname "$src_file")"
-                while [[ "$dir" != "." && "$dir" != "/" ]]; do
-                    rmdir "$dir" 2>/dev/null || break
-                    dir="$(dirname "$dir")"
-                done
+                if rm -f "$src_file"; then
+                    ((removed++))
+                    echo "REMOVED: $src_file"
+                    # Remove empty parent directories
+                    local dir
+                    dir="$(dirname "$src_file")"
+                    while [[ "$dir" != "." && "$dir" != "/" ]]; do
+                        rmdir "$dir" 2>/dev/null || break
+                        dir="$(dirname "$dir")"
+                    done
+                else
+                    echo "ERROR: Failed to remove $src_file" >&2
+                    ((had_error++))
+                fi
             fi
         fi
     else
-        echo "Files DIFFER (CRC mismatch)"
+        [[ "$verbose" -eq 1 ]] && echo "Files DIFFER (CRC mismatch)"
     fi
-    echo
 }
 
-# -------------------------
-# Move or Copy a File
-# -------------------------
+# === File move/copy handler ===
 move_or_copy() {
     local src="$1"
     local dst="$2"
 
     if [[ "$dry_run" -eq 1 ]]; then
         echo "WOULD ${copy_mode:+COPY}${copy_mode:+'MOVE'}: $src -> $dst"
-        return
+        return 0
     fi
 
     if [[ "$copy_mode" -eq 1 ]]; then
-        cp -f "$src" "$dst" && ((copied++))
+        if cp -f "$src" "$dst"; then
+            ((copied++))
+        else
+            echo "ERROR: Failed to copy $src" >&2
+            ((had_error++))
+            return 1
+        fi
     else
-        mv -f "$src" "$dst" && ((moved++))
+        if mv -f "$src" "$dst"; then
+            ((moved++))
+        else
+            echo "ERROR: Failed to move $src" >&2
+            ((had_error++))
+            return 1
+        fi
     fi
 
     if [[ "$preserve_times" -eq 1 ]]; then
-        touch -r "$src" "$dst"
+        touch -r "$src" "$dst" 2>/dev/null || true
     fi
+    return 0
 }
 
-# --------------------------------
-# Central Logic: Handle File Move
-# --------------------------------
+# === Central logic for handling each file ===
 handle_file_move() {
     local src_file="$1"
     local dst_file="$2"
@@ -183,15 +186,13 @@ handle_file_move() {
     mkdir -p "$(dirname "$dst_file")"
 
     if [[ -e "$dst_file" ]]; then
-        if [[ "$compare" -eq 1 ]]; then
-            compare_files "$src_file" "$dst_file"
-        fi
+        [[ "$compare" -eq 1 ]] && compare_files "$src_file" "$dst_file"
 
         if [[ "$interactive" -eq 1 && "$force" -eq 0 ]]; then
             read -p "Overwrite $dst_file? [y/N] " reply
             [[ "$reply" =~ ^[Yy]$ ]] || { ((skipped++)); return; }
         elif [[ "$force" -eq 0 && "$interactive" -eq 0 ]]; then
-            echo "SKIPPED (no action): $dst_file"
+            [[ "$verbose" -eq 1 ]] && echo "SKIPPED (no action): $dst_file"
             ((skipped++))
             return
         fi
@@ -203,9 +204,7 @@ handle_file_move() {
     fi
 }
 
-# ---------------------------
-# Main Loop Over Source Files
-# ---------------------------
+# === Main loop ===
 for src in "${args[@]}"; do
     if [[ -d "$src" && -d "$dst" ]]; then
         # Directory → Directory merge
@@ -220,7 +219,6 @@ for src in "${args[@]}"; do
             find "$src" -depth -type d -empty -delete
             rmdir "$src" 2>/dev/null || true
         fi
-
     elif [[ -f "$src" ]]; then
         # File → File or File → Directory
         if [[ -d "$dst" ]]; then
@@ -229,16 +227,13 @@ for src in "${args[@]}"; do
             dst_file="$dst"
         fi
         handle_file_move "$src" "$dst_file"
-
     else
         echo "SKIPPED (not file or dir): $src"
         ((skipped++))
     fi
 done
 
-# ------------
-# Show Summary
-# ------------
+# === Summary ===
 if [[ "$show_summary" -eq 1 ]]; then
     echo "====== Summary ======"
     echo "Moved      : $moved"
@@ -247,5 +242,8 @@ if [[ "$show_summary" -eq 1 ]]; then
     echo "Removed    : $removed"
     echo "Skipped    : $skipped"
     echo "Compared   : $compared"
+    echo "Errors     : $had_error"
     echo "====================="
 fi
+
+exit "$had_error"
