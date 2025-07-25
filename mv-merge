@@ -60,13 +60,21 @@ compare_files() {
     dst_size=$(stat -c %s "$dst_file")
     src_time=$(stat -c %y "$src_file")
     dst_time=$(stat -c %y "$dst_file")
-    src_crc=$(get_crc32 "$src_file")
-    dst_crc=$(get_crc32 "$dst_file")
 
     echo "SRC Size: $src_size bytes"
     echo "DST Size: $dst_size bytes"
     echo "SRC Time: $src_time"
     echo "DST Time: $dst_time"
+
+    if [[ "$src_size" -ne "$dst_size" ]]; then
+        echo "Files DIFFER (size mismatch)"
+        echo
+        return
+    fi
+
+    src_crc=$(get_crc32 "$src_file")
+    dst_crc=$(get_crc32 "$dst_file")
+
     echo "SRC CRC32: $src_crc"
     echo "DST CRC32: $dst_crc"
 
@@ -78,7 +86,6 @@ compare_files() {
             else
                 rm -f "$src_file"
                 echo "REMOVED: $src_file"
-                # Clean up empty parent dirs
                 dir="$(dirname "$src_file")"
                 while [[ "$dir" != "." && "$dir" != "/" ]]; do
                     rmdir "$dir" 2>/dev/null || break
@@ -87,7 +94,7 @@ compare_files() {
             fi
         fi
     else
-        echo "Files DIFFER"
+        echo "Files DIFFER (CRC mismatch)"
     fi
     echo
 }
